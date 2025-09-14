@@ -1,0 +1,11 @@
+{
+	"name": "raitaku",
+	"version": "1.0.0",
+	"description": "Dook Dook",
+	"type": "module",
+	"license": "GPL-3.0-only",
+	"dependencies": {
+		"node-html-parser": ">=7.0.1",
+		"raiutils": ">=8.7.1"
+	}
+}
