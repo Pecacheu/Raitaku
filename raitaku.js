@@ -15,13 +15,39 @@ schema.checkSchema(Conf, ConfFmt);
 const FA_AUTH={cookie:Conf.faAuth}, IT_AUTH={authorization:Conf.itAuth},
 FA_URI="https://www.furaffinity.net", IT_API="https://itaku.ee/api",
 R_USR=/^\/*user\/(\w+)\/*$/, R_KEY=/[^\w]+/g, R_FN=/^\d+\.[^_]+_(.+)$/, R_TM=/[^\w]/g,
-CMDS=['transfer', 'getfa'], TagCache={}, Arg=process.argv, print=console.log;
+CMDS=['transfer', 'faget', 'fagal'], TagCache={}, Arg=process.argv, print=console.log;
 Arg.splice(0,2);
 
 //============================================== FurAffinity API ==============================================
 
-async function getFaPost(id) {
-	print(C.dim("Loading FA #"+id));
+async function getFaGallery(user, page=1) {
+	print(C.dim(`Loading FA Gallery @${user} p${page}`));
+	let fa={url:`${FA_URI}/gallery/${user}/${page}`, user, page, posts:[]};
+	try {
+		//Fetch page
+		let dom=await httpReq(fa.url, 0, FA_AUTH);
+		dom=parse(dom);
+		//Read posts
+		let el=dom.querySelector('section.gallery'),p;
+		if(!el) throw "Gallery List";
+		el.querySelectorAll('figure').forEach(f => {
+			el=f.querySelector('figcaption a');
+			if(!el) throw "Caption";
+			p=el.attributes.href;
+			if(p.endsWith('/')) p=p.slice(0,-1);
+			p={title:el.textContent.trim(), url:faAbsURL(p),
+				id:p.slice(p.lastIndexOf('/')+1)};
+			el=f.querySelector('img');
+			if(!el) throw "Thumbnail";
+			p.thumb = faAbsURL(el.attributes.src);
+			fa.posts.push(p);
+		});
+	} catch(e) {throw schema.errAt(`Parse FA @${user} p${page}`,e)}
+	return fa;
+}
+
+async function getFaPost(id, getFile=true) {
+	print(C.magenta("Loading FA #"+id));
 	let fa={url:`${FA_URI}/view/${id}`};
 	try {
 		//Fetch post
@@ -90,8 +116,8 @@ async function getFaPost(id) {
 			fa.folders.push(e.textContent.trim());
 		});
 		//Get file
-		fa.data = await httpReq(fa.file, 0, FA_AUTH, "GET", 1);
-	} catch(e) {throw schema.errAt("FA Parse Error",e)}
+		if(getFile) fa.data = await httpReq(fa.file, 0, FA_AUTH, "GET", 1);
+	} catch(e) {throw schema.errAt(`Parse FA #${id}`,e)}
 	return fa;
 }
 
@@ -122,8 +148,9 @@ function faAbsURL(url) {return new URL(url, FA_URI).toString()}
 
 //============================================== Itaku API ==============================================
 
-async function postItaku(fa) {
-	let r=await convertTags(fa), tags=[], t;
+async function postItaku(fa, wSkp) {
+	if(fa.fn.endsWith('.swf')) throw "Flash not supported";
+	let r=await convertTags(fa, wSkp), tags=[], t;
 	print(C.cyan(`Posting "${fa.title}" to Itaku`));
 	for(t in r) tags.push(t); //Tags dict -> list
 	if(tags.length < 5) throw `Not enough tags! (${tags.join(', ')})`;
@@ -140,7 +167,7 @@ async function postItaku(fa) {
 	return await httpReq(IT_API+"/galleries/images/", fd, IT_AUTH, "POST");
 }
 
-async function convertTags(fa) {
+async function convertTags(fa, wSkp) {
 	print(C.cyan("Matching to Itaku tag IDs"));
 	let tags={},te=[],p=[],t;
 	//Info Tags
@@ -168,6 +195,7 @@ async function convertTags(fa) {
 	if(fa.species!=='Unspecified / Any') await addTag(fa.species, tags, te);
 	//Special rules
 	t=fa.tags;
+	if(t.multiple) delete t.multiple, t.multi=1;
 	if(t.aura && t.sensors) {
 		delete t.aura, delete t.sensors;
 		tags.aura_sensors=1;
@@ -177,17 +205,19 @@ async function convertTags(fa) {
 		tags.lgd=1;
 	}
 	//Post Tags
-	for(t in fa.tags) p.push(addTag(t,tags,te));
-	await Promise.all(p);
-	if(te.length) await promptWarn("Unknown tags: "+te.join(', '));
+	for(t in fa.tags) await addTag(t,tags,te);
+	if(te.length) {
+		te="Unknown tags: "+te.join(', ');
+		if(wSkp) console.error(C.yellow(te));
+		else await promptWarn(te);
+	}
 	return tags;
 }
 
 async function addTag(tag, tags, te) {
 	//Special rules
-	if(tag.startsWith('multi') && tag[5] && tag[5]!=='_') {
-		tag='multi_'+tag.slice(5);
-	}
+	if(!tag.startsWith('multiple') && tag.startsWith('multi')
+		&& tag[5] && tag[5]!=='_') tag='multi_'+tag.slice(5);
 	//Check cache
 	let t=TagCache[tag=toKeyFmt(tag)];
 	if(t) return tags[t]=1;
@@ -197,9 +227,9 @@ async function addTag(tag, tags, te) {
 	t=t.results.each(r => r.name.replace(R_TM,'')===tm?r:null);
 	if(!t) return te.push(tag); //Tag not found
 	if(t.synonymous_to) t=t.synonymous_to;
-	t=t.name, TagCache[tag]=t;
+	tags[t=t.name]=1, TagCache[tag]=t;
 	if(tag!==t) TagCache[t]=t;
-	tags[t]=1;
+	print(C.dim(`Tag ${tag} -> ${t}`));
 }
 
 //============================================== Support ==============================================
@@ -247,19 +277,52 @@ async function httpReq(uri, data, hdr, meth='GET', blob) {
 	return r;
 }
 
-function usage(u) {print(C.red(`Usage: raitaku ${u?Arg[0]+' '+u:CMDS.join('|')}`))}
+function usage(u) {print(C.red(`Usage: node raitaku ${u?Arg[0]+' '+u:CMDS.join('|')}`))}
 
 //============================================== Main ==============================================
 
-switch(Arg[0]) {
-	case 'transfer':
-		if(Arg.length !== 2) usage("<faPostID>");
-		else {
-			let d=await postItaku(await getFaPost(Arg[1]));
+async function transfer(idSt, idEnd, wSkp) {
+	if(!idEnd || idSt===idEnd) return postItaku(await getFaPost(idSt), wSkp);
+	print(`Transferring posts from #${idSt} to #${idEnd}`);
+	let d=await getFaPost(idSt, false), gal=[], pg=1, i,s,e,sp,ep;
+	for(; !sp || !ep; ++pg) {
+		i=(gal[pg] = await getFaGallery(d.user, pg)).posts;
+		if(!i.length) throw "Target post(s) not found!";
+		if(!sp) { //Find start
+			s=i.each((p,i) => p.id===idSt?i:null);
+			if(s!=null) print(C.yellow(`Found start #${idSt} on page`, sp=pg));
+		}
+		if(!ep) { //Find end
+			e=i.each((p,i) => p.id===idEnd?i:null);
+			if(e!=null) print(C.yellow(`Found end #${idEnd} on page`, ep=pg));
+		}
+	}
+	if(ep>sp || (ep===sp && e>s)) i=s,s=e,e=i, i=sp,sp=ep,ep=i; //Swap start & end
+	for(i=s,pg=sp; pg>=ep; --pg) { //Pages
+		print(C.yellowBright("-- Page", pg));
+		for(sp=(pg===ep?e:0); i>=sp; --i) { //Posts
+			s=gal[pg].posts[i], d=await getFaPost(s.id);
+			if(d.fn.endsWith('.swf')) { //Use thumbnail for SWF
+				d.data = await httpReq(s.thumb, 0, FA_AUTH, "GET", 1);
+				d.fn += path.extname(s.thumb);
+			}
+			d.fn+='.jpg';
+			d=await postItaku(d, wSkp);
 			print(C.green(`Live at https://itaku.ee/images/${d.id}`));
 		}
-	break; case 'getfa':
+		if(pg>1) i=gal[pg-1].posts.length-1;
+	}
+}
+
+switch(Arg[0]) {
+	case 'transfer':
+		if(Arg.length<2 || Arg.length>4) usage("<faStartID> [faEndID] [skipWarnings]");
+		else await transfer(Arg[1], Arg[2], Arg[3]==='true');
+	break; case 'faget':
 		if(Arg.length !== 2) usage("<faPostID>");
-		else print(await getFaPost(Arg[1]));
+		else print(await getFaPost(Arg[1], false));
+	break; case 'fagal':
+		if(Arg.length !== 3) usage("<faUser> <page>");
+		else print(await getFaGallery(Arg[1], Arg[2]));
 	break; default: usage();
 }

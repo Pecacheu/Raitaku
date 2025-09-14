@@ -17,7 +17,10 @@ Rename `configExample.json` to `config.json`, and edit the config with your actu
 
 # Usage
 
-- `node raitaku transfer <faPostID>` Transfer an FA post to your Itaku
-- `node raitaku getfa <faPostID>` Parse & display FA post data
+**Note:** To find an FA post ID, check the last part of the URL, something like `/view/<faPostID>/`. For usernames, make sure to use them as they appear in the URL, not the nickname.
 
-*Bulk upload feature coming soon!*
+- `node raitaku transfer <faStartID> [faEndID] [skipWarnings]` Transfer an FA post to your Itaku. *faEndID* is optional, provide it to run a bulk upload job. Set *skipWarnings* to `true` to auto-accept non-fatal warning prompts.
+- `node raitaku faget <faPostID>` Parse & display FA post data.
+- `node raitaku fagal <faUser> <page>` Parse & display FA gallery data.
+
+You can also run any sub-command without arguments to see usage info.
