@@ -19,8 +19,13 @@ Rename `configExample.json` to `config.json`, and edit the config with your actu
 
 **Note:** To find an FA post ID, check the last part of the URL, something like `/view/<faPostID>/`. For usernames, make sure to use them as they appear in the URL, not the nickname.
 
-- `node raitaku transfer <faStartID> [faEndID] [skipWarnings]` Transfer an FA post to your Itaku. *faEndID* is optional, provide it to run a bulk upload job. Set *skipWarnings* to `true` to auto-accept non-fatal warning prompts.
+- `node raitaku transfer <faStartID> [faEndID] [skipWarnings] [bulkSets]` Transfer an FA post to your Itaku. *faEndID* is optional, provide it to run a bulk upload job. Set *skipWarnings* to `true` to auto-accept non-fatal warning prompts. By default, image sets (detected by the `<< PREV | NEXT >>` links in FA description) are uploaded to Itaku together. Set *bulkSets* to `false` to disable.
 - `node raitaku faget <faPostID>` Parse & display FA post data.
 - `node raitaku fagal <faUser> <page>` Parse & display FA gallery data.
 
 You can also run any sub-command without arguments to see usage info.
+
+## TODO
+- Detect FA story submissions and convert to Itaku posts (probably won't do so for journals, only submissions)
+- ~~Search for users in description to link their Itaku account instead of FA~~
+- ~~More description parsing~~

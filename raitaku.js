@@ -14,9 +14,11 @@ schema.checkSchema(Conf, ConfFmt);
 
 const FA_AUTH={cookie:Conf.faAuth}, IT_AUTH={authorization:Conf.itAuth},
 FA_URI="https://www.furaffinity.net", IT_API="https://itaku.ee/api",
-R_USR=/^\/*user\/(\w+)\/*$/, R_KEY=/[^\w]+/g, R_FN=/^\d+\.[^_]+_(.+)$/, R_TM=/[^\w]/g,
-CMDS=['transfer', 'faget', 'fagal'], TagCache={}, Arg=process.argv, print=console.log;
+R_ID=/(?:user|view)\/(\w+)\/*$/, R_FN=/^\d+\.[^_]+_(.+)$/, R_KEY=/[^\w]+/g,
+R_KTR=/^_+|_+$/g, R_TM=/[^\w]/g, CMDS=['transfer', 'faget', 'fagal'],
+TagCache={}, UserCache={}, PostedIDs={}, Arg=process.argv, print=console.log;
 Arg.splice(0,2);
+let SkipWarn;
 
 //============================================== FurAffinity API ==============================================
 
@@ -35,8 +37,7 @@ async function getFaGallery(user, page=1) {
 			if(!el) throw "Caption";
 			p=el.attributes.href;
 			if(p.endsWith('/')) p=p.slice(0,-1);
-			p={title:el.textContent.trim(), url:faAbsURL(p),
-				id:p.slice(p.lastIndexOf('/')+1)};
+			p={title:el.textContent.trim(), url:faAbsURL(p), id:R_ID.exec(p)[1]};
 			el=f.querySelector('img');
 			if(!el) throw "Thumbnail";
 			p.thumb = faAbsURL(el.attributes.src);
@@ -46,7 +47,7 @@ async function getFaGallery(user, page=1) {
 	return fa;
 }
 
-async function getFaPost(id, getFile=true) {
+async function getFaPost(id) {
 	print(C.magenta("Loading FA #"+id));
 	let fa={url:`${FA_URI}/view/${id}`};
 	try {
@@ -66,7 +67,7 @@ async function getFaPost(id, getFile=true) {
 		//Post info
 		el=dom.querySelector('.submission-user-icon');
 		if(!el) throw "User Icon";
-		el=R_USR.exec(el.parentNode.attributes.href);
+		el=R_ID.exec(el.parentNode.attributes.href);
 		if(!el) throw "Username Format";
 		fa.user = el[1];
 		el=dom.querySelector('.submission-title');
@@ -74,7 +75,7 @@ async function getFaPost(id, getFile=true) {
 		fa.title = el.textContent.trim();
 		el=dom.querySelector('.submission-description');
 		if(!el) throw "Desc";
-		fa.desc = faDescToMd(el);
+		fa.desc = await faDescToMd(el, fa);
 		el=dom.querySelector('meta[name=twitter:data1]');
 		if(!el) throw "Date";
 		fa.date = el.attributes.content.trim();
@@ -115,17 +116,41 @@ async function getFaPost(id, getFile=true) {
 			if(!e) throw "Folder Name";
 			fa.folders.push(e.textContent.trim());
 		});
-		//Get file
-		if(getFile) fa.data = await httpReq(fa.file, 0, FA_AUTH, "GET", 1);
 	} catch(e) {throw schema.errAt(`Parse FA #${id}`,e)}
 	return fa;
 }
 
-function faDescToMd(sd) {
-	let txt='',t,ss,se,n;
+async function getFaUser(user) {
+	print(C.dim(`Loading FA User @${user}`));
+	let fa={url:`${FA_URI}/user/${user}`, user};
+	try {
+		//Fetch page
+		let dom=await httpReq(fa.url, 0, FA_AUTH);
+		dom=parse(dom);
+		//Read info
+		let el=dom.querySelector('.user-contact'),p;
+		if(!el) throw "Contacts";
+		fa.contacts = {};
+		el.querySelectorAll('.user-contact-item').forEach(c => {
+			el=c.querySelector('strong');
+			if(!el) throw "Contact Name";
+			el=toKeyFmt(el.textContent);
+			c=c.querySelector('a');
+			if(!c) throw "Contact Link";
+			c=c.textContent;
+			if(el!=='website' && el!=='email') c=toKeyFmt(c);
+			if(c!=='ask') fa.contacts[el]=c;
+		});
+	} catch(e) {throw schema.errAt(`Parse FA @${user} p${page}`,e)}
+	return fa;
+}
+
+async function faDescToMd(sd, fa) {
 	sd=sd.childNodes;
-	sd.each((e,i) => {
-		if(e.tagName==='BR') {txt+='\n'; return}
+	let txt='',i=0,l=sd.length, t,ss,se,n,e;
+	for(; i<l; ++i) {
+		e=sd[i];
+		if(e.tagName==='BR') {txt+='\n'; continue}
 		t=e.textContent, ss=t.startsWith(' '), se=t.endsWith(' ');
 		if(ss && (n=sd[i-1]) && n.tagName==='BR') ss=0;
 		if(se && (n=sd[i+1]) && n.tagName==='BR') se=0;
@@ -134,42 +159,97 @@ function faDescToMd(sd) {
 			case 'I': case 'EM': t=`_${t}_`; break; //Italic
 			case 'B': case 'STRONG': t=`**${t}**`; break; //Bold
 			case 'S': t=`~~${t}~~`; break; //Strike
-			case 'A':
-				n=e.attributes.href;
-				if(e.classList.contains('iconusername')) t=faAbsURL(n); //User
-				else t=n===t?t:`[${t}](${faAbsURL(n)})`; //Link
+			case 'SPAN':
+			if(e.classList.contains('parsed_nav_links')) { //Nav Links
+				if(!fa.set) {
+					fa.set={};
+					e.querySelectorAll('a').each(a => {
+						fa.set[toKeyFmt(a.textContent)] = R_ID.exec(a.attributes.href)[1];
+					});
+				}
+				continue;
+			}
+			break; case 'A':
+			n=e.attributes.href;
+			if(e.classList.contains('iconusername')) { //User
+				n=R_ID.exec(n)[1], t=0;
+				if(UserCache[n]==null) { //FA -> Itaku User
+					let fc=await getFaUser(n), cl={[n]:1}, u;
+					if(fc) {
+						fc=fc.contacts;
+						delete fc.website, delete fc.email;
+						for(u in fc) cl[fc[u]]=1;
+						for(u in cl) try {
+							u=await getItakuUser(u);
+							t='@'+(UserCache[n]=u.owner_username), n=0;
+							break;
+						} catch(e) {}
+					} else {
+						UserCache[n]=0;
+						warn(`No such user '${n}'`);
+					}
+				} else if(UserCache[n]) t='@'+UserCache[n], n=0; //From Cache
+			}
+			if(n) t=n===t?t:`[${t}](${faAbsURL(n)})`; //Link
 		}
 		txt += (ss?' ':'')+t+(se?' ':'');
-	});
+	}
 	return txt.trim();
 }
 
 function faAbsURL(url) {return new URL(url, FA_URI).toString()}
+function loadFaImg(url) {return httpReq(url, 0, FA_AUTH, "GET", 1)}
 
 //============================================== Itaku API ==============================================
 
-async function postItaku(fa, wSkp) {
-	if(fa.fn.endsWith('.swf')) throw "Flash not supported";
-	let r=await convertTags(fa, wSkp), tags=[], t;
+async function getItakuUser(user) {
+	print(C.dim(`Loading Itaku User @${user}`));
+	return await httpReq(IT_API+`/user_profiles/${user}/`, 0, IT_AUTH);
+}
+
+async function newItakuImg(fa) {
 	print(C.cyan(`Posting "${fa.title}" to Itaku`));
-	for(t in r) tags.push(t); //Tags dict -> list
+	if(fa.cat==='Story') return promptWarn("Stories not yet supported on Itaku");
+	if(fa.fn.endsWith('.swf')) return promptWarn("Flash not supported");
+	let it=await convertTags(fa), tags=[], t,r;
+	for(t in it) tags.push(t); //Tags dict -> list
 	if(tags.length < 5) throw `Not enough tags! (${tags.join(', ')})`;
 	tags=tags.map(t => ({name:t}));
 	switch(fa.rating) {
 		case 'General': r='SFW'; break;
-		case 'Mature': r='Questionable';
+		case 'Mature': r='Questionable'; break;
 		default: r='NSFW';
 	}
 	fa.desc += `\n\n${fa.url}\n*Posted via Raitaku; Uploaded to FA on ${fa.date}*`;
-	let fd=toFormData({title:fa.title, description:fa.desc, tags:tags, maturity_rating:r,
-		sections:fa.folders, visibility:'PUBLIC', add_to_feed:true});
+	let fd=toFormData({title:fa.title, description:fa.desc, tags, maturity_rating:r,
+		sections:fa.folders, visibility:'PUBLIC'});
+	if(!fa.set) fd.set('add_to_feed', true);
 	fd.set('image', fa.data, fa.fn);
-	return await httpReq(IT_API+"/galleries/images/", fd, IT_AUTH, "POST");
+	r=await httpReq(IT_API+"/galleries/images/", fd, IT_AUTH, "POST");
+	print(C.green(`Live at https://itaku.ee/images/${r.id}`));
+	r.newTags=it, PostedIDs[fa.id]={id:r.id, newTags:it};
+	return r;
 }
 
-async function convertTags(fa, wSkp) {
+async function newItakuPost(dat) {
+	print(C.bgMagenta(`Posting Itaku set "${dat.title}"`));
+	let tags=[],r,t;
+	for(t in dat.tags) tags.push({name:t}); //Tags dict -> list
+	dat.ids.forEach((d,i) => dat.ids[i]=Number(d));
+	switch(dat.rating) {
+		case 'General': r='SFW'; break;
+		case 'Mature': r='Questionable'; break;
+		default: r='NSFW';
+	}
+	r=await httpReq(IT_API+"/posts/", {title:dat.title, content:dat.desc||'', tags,
+		maturity_rating:r, gallery_images:dat.ids, visibility:'PUBLIC'}, IT_AUTH, "POST");
+	print(C.green(`Live at https://itaku.ee/posts/${r.id}`));
+	return r;
+}
+
+async function convertTags(fa) {
 	print(C.cyan("Matching to Itaku tag IDs"));
-	let tags={},te=[],p=[],t;
+	let tags={},te=[],t;
 	//Info Tags
 	switch(fa.cat) {
 		case 'Artwork (Digital)': tags.digital_art=1; break;
@@ -206,11 +286,7 @@ async function convertTags(fa, wSkp) {
 	}
 	//Post Tags
 	for(t in fa.tags) await addTag(t,tags,te);
-	if(te.length) {
-		te="Unknown tags: "+te.join(', ');
-		if(wSkp) console.error(C.yellow(te));
-		else await promptWarn(te);
-	}
+	if(te.length) await promptWarn("Unknown tags: "+te.join(', '));
 	return tags;
 }
 
@@ -222,7 +298,7 @@ async function addTag(tag, tags, te) {
 	let t=TagCache[tag=toKeyFmt(tag)];
 	if(t) return tags[t]=1;
 	//Check Itaku
-	t=await httpReq(IT_API+"/tags", {name:tag, type:'images'}, IT_AUTH);
+	t=await httpReq(IT_API+"/tags/", {name:tag, type:'images'}, IT_AUTH);
 	let tm=tag.replace(R_TM,'');
 	t=t.results.each(r => r.name.replace(R_TM,'')===tm?r:null);
 	if(!t) return te.push(tag); //Tag not found
@@ -234,19 +310,22 @@ async function addTag(tag, tags, te) {
 
 //============================================== Support ==============================================
 
+function warn(w) {console.error(C.yellow(w))}
+
 async function prompt(q) {
 	let r=RL.createInterface({input:process.stdin, output:process.stdout});
 	return new Promise(res => r.question(q, a => {r.close(),res(a)}));
 }
 
 async function promptWarn(w) {
-	console.error(C.yellow(w));
+	warn(w);
+	if(SkipWarn) return;
 	let a=(await prompt("Continue? (Y/N) ")).toLowerCase();
 	if(a!=='y' && a!=='yes') throw w;
 }
 
 function toKeyFmt(s) {
-	return s.trim().toLowerCase().replace(R_KEY,'_');
+	return s.toLowerCase().replace(R_KEY,'_').replace(R_KTR,'');
 }
 
 function toFormData(obj) {
@@ -281,10 +360,44 @@ function usage(u) {print(C.red(`Usage: node raitaku ${u?Arg[0]+' '+u:CMDS.join('
 
 //============================================== Main ==============================================
 
-async function transfer(idSt, idEnd, wSkp) {
-	if(!idEnd || idSt===idEnd) return postItaku(await getFaPost(idSt), wSkp);
+async function transferOne(id, doSets) {
+		if(PostedIDs[id]) return print(C.dim(`#${id} Already posted`));
+		let fa=await getFaPost(id); //Download
+		if(doSets && fa.set) { //Set / Comic
+			//Find first post
+			while(1) {
+				id=fa.set.first||fa.set.prev;
+				if(!id) break;
+				fa=await getFaPost(id);
+				if(!fa.set) throw "Error while following image set chain";
+			}
+			print(C.bgMagenta(`Found an image set starting at "${fa.title}"`));
+			//Upload all
+			let ids=[],tags={},fp=fa, d,t;
+			while(1) {
+				if(d=PostedIDs[id]) { //Already posted
+					if(ids.indexOf(d.id)!==-1) {warn("Recursive loop; Breaking cycle"); break}
+				} else { //New post
+					fa.data = await loadFaImg(fa.file);
+					d=await newItakuImg(fa);
+				}
+				ids.push(d.id);
+				for(t in d.newTags) tags[t]=1;
+				if(!fa.set || !(id=fa.set.next)) break;
+				fa=await getFaPost(id);
+			}
+			//Create post set
+			return newItakuPost({title:fp.title, desc:fp.desc,
+				rating:fp.rating, tags, ids});
+		}
+		fa.data = await loadFaImg(fa.file); //Get file
+		return newItakuImg(fa); //Upload
+}
+
+async function transfer(idSt, idEnd, doSets) {
+	if(!idEnd || idSt===idEnd) return transferOne(idSt, doSets);
 	print(`Transferring posts from #${idSt} to #${idEnd}`);
-	let d=await getFaPost(idSt, false), gal=[], pg=1, i,s,e,sp,ep;
+	let d=await getFaPost(idSt), gal=[], pg=1, i,s,e,sp,ep;
 	for(; !sp || !ep; ++pg) {
 		i=(gal[pg] = await getFaGallery(d.user, pg)).posts;
 		if(!i.length) throw "Target post(s) not found!";
@@ -301,14 +414,7 @@ async function transfer(idSt, idEnd, wSkp) {
 	for(i=s,pg=sp; pg>=ep; --pg) { //Pages
 		print(C.yellowBright("-- Page", pg));
 		for(sp=(pg===ep?e:0); i>=sp; --i) { //Posts
-			s=gal[pg].posts[i], d=await getFaPost(s.id);
-			if(d.fn.endsWith('.swf')) { //Use thumbnail for SWF
-				d.data = await httpReq(s.thumb, 0, FA_AUTH, "GET", 1);
-				d.fn += path.extname(s.thumb);
-			}
-			d.fn+='.jpg';
-			d=await postItaku(d, wSkp);
-			print(C.green(`Live at https://itaku.ee/images/${d.id}`));
+			await transferOne(gal[pg].posts[i].id, doSets);
 		}
 		if(pg>1) i=gal[pg-1].posts.length-1;
 	}
@@ -316,11 +422,14 @@ async function transfer(idSt, idEnd, wSkp) {
 
 switch(Arg[0]) {
 	case 'transfer':
-		if(Arg.length<2 || Arg.length>4) usage("<faStartID> [faEndID] [skipWarnings]");
-		else await transfer(Arg[1], Arg[2], Arg[3]==='true');
+		if(Arg.length<2 || Arg.length>4) usage("<faStartID> [faEndID] [skipWarnings] [bulkSets]");
+		else {
+			SkipWarn = Arg[3]==='true';
+			await transfer(Arg[1], Arg[2], Arg[4]!=='false');
+		}
 	break; case 'faget':
 		if(Arg.length !== 2) usage("<faPostID>");
-		else print(await getFaPost(Arg[1], false));
+		else print(await getFaPost(Arg[1]));
 	break; case 'fagal':
 		if(Arg.length !== 3) usage("<faUser> <page>");
 		else print(await getFaGallery(Arg[1], Arg[2]));
