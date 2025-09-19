@@ -43,11 +43,11 @@ async function getFaGallery(user, page=1) {
 			p.thumb = faAbsURL(el.attributes.src);
 			fa.posts.push(p);
 		});
-	} catch(e) {throw schema.errAt(`Parse FA @${user} p${page}`,e)}
+	} catch(e) {throw schema.errAt(`Parse FA Gal @${user} p${page}`,e)}
 	return fa;
 }
 
-async function getFaPost(id) {
+async function getFaPost(id, noDesc) {
 	print(C.magenta("Loading FA #"+id));
 	let fa={url:`${FA_URI}/view/${id}`};
 	try {
@@ -75,7 +75,7 @@ async function getFaPost(id) {
 		fa.title = el.textContent.trim();
 		el=dom.querySelector('.submission-description');
 		if(!el) throw "Desc";
-		fa.desc = await faDescToMd(el, fa);
+		fa.desc = noDesc?el:await faDescToMd(el,fa);
 		el=dom.querySelector('meta[name=twitter:data1]');
 		if(!el) throw "Date";
 		fa.date = el.attributes.content.trim();
@@ -121,17 +121,16 @@ async function getFaPost(id) {
 }
 
 async function getFaUser(user) {
-	print(C.dim(`Loading FA User @${user}`));
+	print(C.dim(`Checking FA User @${user}`));
 	let fa={url:`${FA_URI}/user/${user}`, user};
 	try {
 		//Fetch page
 		let dom=await httpReq(fa.url, 0, FA_AUTH);
 		dom=parse(dom);
 		//Read info
-		let el=dom.querySelector('.user-contact'),p;
-		if(!el) throw "Contacts";
 		fa.contacts = {};
-		el.querySelectorAll('.user-contact-item').forEach(c => {
+		let el=dom.querySelector('.user-contact');
+		if(el) el.querySelectorAll('.user-contact-item').forEach(c => {
 			el=c.querySelector('strong');
 			if(!el) throw "Contact Name";
 			el=toKeyFmt(el.textContent);
@@ -141,7 +140,7 @@ async function getFaUser(user) {
 			if(el!=='website' && el!=='email') c=toKeyFmt(c);
 			if(c!=='ask') fa.contacts[el]=c;
 		});
-	} catch(e) {throw schema.errAt(`Parse FA @${user} p${page}`,e)}
+	} catch(e) {throw schema.errAt(`Parse FA @${user}`,e)}
 	return fa;
 }
 
@@ -170,27 +169,28 @@ async function faDescToMd(sd, fa) {
 				continue;
 			}
 			break; case 'A':
-			n=e.attributes.href;
+			n=faAbsURL(e.attributes.href);
 			if(e.classList.contains('iconusername')) { //User
-				n=R_ID.exec(n)[1], t=0;
-				if(UserCache[n]==null) { //FA -> Itaku User
-					let fc=await getFaUser(n), cl={[n]:1}, u;
+				let id=R_ID.exec(n)[1]; t=n;
+				if(UserCache[id]==null) { //FA -> Itaku User
+					let cl={[id]:1}, fc,u;
+					/*TODO What error does it throw when user not found?
+					try {fc=await getFaUser(n)}
+					catch(e) {warn(`No such user '${n}'`))}*/
+					fc=await getFaUser(id);
 					if(fc) {
 						fc=fc.contacts;
 						delete fc.website, delete fc.email;
 						for(u in fc) cl[fc[u]]=1;
 						for(u in cl) try {
 							u=await getItakuUser(u);
-							t='@'+(UserCache[n]=u.owner_username), n=0;
+							t='@'+(UserCache[id]=u.owner_username), n=0;
 							break;
 						} catch(e) {}
-					} else {
-						UserCache[n]=0;
-						warn(`No such user '${n}'`);
-					}
-				} else if(UserCache[n]) t='@'+UserCache[n], n=0; //From Cache
+					} else UserCache[id]=0;
+				} else if(UserCache[id]) t='@'+UserCache[id], n=0; //From Cache
 			}
-			if(n) t=n===t?t:`[${t}](${faAbsURL(n)})`; //Link
+			if(n) t=n===t?t:`[${t}](${n})`; //Link
 		}
 		txt += (ss?' ':'')+t+(se?' ':'');
 	}
@@ -203,7 +203,7 @@ function loadFaImg(url) {return httpReq(url, 0, FA_AUTH, "GET", 1)}
 //============================================== Itaku API ==============================================
 
 async function getItakuUser(user) {
-	print(C.dim(`Loading Itaku User @${user}`));
+	print(C.dim(`Checking Itaku User @${user}`));
 	return await httpReq(IT_API+`/user_profiles/${user}/`, 0, IT_AUTH);
 }
 
@@ -368,10 +368,11 @@ async function transferOne(id, doSets) {
 			while(1) {
 				id=fa.set.first||fa.set.prev;
 				if(!id) break;
-				fa=await getFaPost(id);
+				fa=await getFaPost(id, true);
 				if(!fa.set) throw "Error while following image set chain";
 			}
 			print(C.bgMagenta(`Found an image set starting at "${fa.title}"`));
+			fa.desc = await faDescToMd(fa.desc, fa);
 			//Upload all
 			let ids=[],tags={},fp=fa, d,t;
 			while(1) {
@@ -397,7 +398,7 @@ async function transferOne(id, doSets) {
 async function transfer(idSt, idEnd, doSets) {
 	if(!idEnd || idSt===idEnd) return transferOne(idSt, doSets);
 	print(`Transferring posts from #${idSt} to #${idEnd}`);
-	let d=await getFaPost(idSt), gal=[], pg=1, i,s,e,sp,ep;
+	let d=await getFaPost(idSt, true), gal=[], pg=1, i,s,e,sp,ep;
 	for(; !sp || !ep; ++pg) {
 		i=(gal[pg] = await getFaGallery(d.user, pg)).posts;
 		if(!i.length) throw "Target post(s) not found!";
