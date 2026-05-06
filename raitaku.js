@@ -174,10 +174,11 @@ async function faDescToMd(sd, fa) {
 				let id=R_ID.exec(n)[1]; t=n;
 				if(UserCache[id]==null) { //FA -> Itaku User
 					let cl={[id]:1}, fc,u;
-					/*TODO What error does it throw when user not found?
-					try {fc=await getFaUser(n)}
-					catch(e) {warn(`No such user '${n}'`))}*/
-					fc=await getFaUser(id);
+					try {fc=await getFaUser(id)}
+					catch(e) {
+						if(!e.cause || e.cause.code !== 400) throw e;
+						warn(`No such user '${id}'`);
+					}
 					if(fc) {
 						fc=fc.contacts;
 						delete fc.website, delete fc.email;
@@ -273,7 +274,9 @@ async function convertTags(fa) {
 		default: await addTag(fa.type, tags, te);
 	}
 	if(fa.species!=='Unspecified / Any') await addTag(fa.species, tags, te);
-	//Special rules
+	//----------------------------------------------------------------------------------------
+	//-------------------------- Add your own multi-tag rules here! --------------------------
+	//----------------------------------------------------------------------------------------
 	t=fa.tags;
 	if(t.multiple) delete t.multiple, t.multi=1;
 	if(t.aura && t.sensors) {
@@ -284,6 +287,11 @@ async function convertTags(fa) {
 		delete t.living, delete t.gasm, delete t.drive;
 		tags.lgd=1;
 	}
+	if(t.animate || t.inanimate) {
+		delete t.animate, delete t.inanimate;
+		tags.animate_inanimate=1;
+	}
+	//----------------------------------------------------------------------------------------
 	//Post Tags
 	for(t in fa.tags) await addTag(t,tags,te);
 	if(te.length) await promptWarn("Unknown tags: "+te.join(', '));
@@ -291,9 +299,17 @@ async function convertTags(fa) {
 }
 
 async function addTag(tag, tags, te) {
-	//Special rules
-	if(!tag.startsWith('multiple') && tag.startsWith('multi')
+	let tOld=tag;
+	//----------------------------------------------------------------------------------------
+	//------------------------- Add your own special tag rules here! -------------------------
+	//----------------------------------------------------------------------------------------
+	if(tag === 'tonguepussy') tag = 'pussy_tongue';
+	else if(!tag.startsWith('multiple') && tag.startsWith('multi')
 		&& tag[5] && tag[5]!=='_') tag='multi_'+tag.slice(5);
+	else if(tag.endsWith('maw')) tag=tag.slice(0,-3)+'mouth';
+	fixSuffix(tag, 'mouth');
+	fixSuffix(tag, 'vore');
+	//----------------------------------------------------------------------------------------
 	//Check cache
 	let t=TagCache[tag=toKeyFmt(tag)];
 	if(t) return tags[t]=1;
@@ -305,7 +321,14 @@ async function addTag(tag, tags, te) {
 	if(t.synonymous_to) t=t.synonymous_to;
 	tags[t=t.name]=1, TagCache[tag]=t;
 	if(tag!==t) TagCache[t]=t;
-	print(C.dim(`Tag ${tag} -> ${t}`));
+	print(C.dim(`Tag ${tOld} -> ${t}`));
+}
+
+function fixSuffix(tag, name) {
+	if(!tag.endsWith(name)) return tag;
+	let nl=name.length, s=tag[tag.length-nl-1];
+	if(!s || s==='_') return tag;
+	return tag.slice(0,-nl)+'_'+name;
 }
 
 //============================================== Support ==============================================
@@ -335,6 +358,13 @@ function toFormData(obj) {
 	return fd;
 }
 
+class HTTPError extends Error {
+	constructor(code, body, uri) {
+		super(`Code ${code}${body&&body.length<500?` (${body})`:''} @ ${uri}`);
+		this.code = code;
+	}
+}
+
 async function httpReq(uri, data, hdr, meth='GET', blob) {
 	let r={method:meth, headers:hdr||{}};
 	if(meth!=='GET' && data) {
@@ -348,7 +378,7 @@ async function httpReq(uri, data, hdr, meth='GET', blob) {
 	if(r.status!==200 && r.status!==201) {
 		let b=await r.text(), q=uri.indexOf('?');
 		if(q!==-1) uri=uri.slice(0,q);
-		throw `Code ${r.status}${b&&b.length<500?` (${b})`:''} @ ${uri}`;
+		throw new HTTPError(r.status, b, uri);
 	}
 	if(blob) return await r.blob();
 	r=await r.text();
@@ -362,7 +392,7 @@ function usage(u) {print(C.red(`Usage: node raitaku ${u?Arg[0]+' '+u:CMDS.join('
 
 async function transferOne(id, doSets) {
 		if(PostedIDs[id]) return print(C.dim(`#${id} Already posted`));
-		let fa=await getFaPost(id); //Download
+		let fa=await getFaPost(id, true); //Download
 		if(doSets && fa.set) { //Set / Comic
 			//Find first post
 			while(1) {
@@ -390,6 +420,8 @@ async function transferOne(id, doSets) {
 			//Create post set
 			return newItakuPost({title:fp.title, desc:fp.desc,
 				rating:fp.rating, tags, ids});
+		} else {
+			fa.desc = await faDescToMd(fa.desc, fa);
 		}
 		fa.data = await loadFaImg(fa.file); //Get file
 		return newItakuImg(fa); //Upload
