@@ -2,8 +2,14 @@
 	"name": "raitaku",
 	"version": "1.1.4",
 	"description": "Dook Dook",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/Pecacheu/Raitaku.git"
+	},
+	"homepage": "https://github.com/Pecacheu/Raitaku",
 	"type": "module",
-	"license": "GPL-3.0-only",
+	"author": "Pecacheu",
+	"license": "GPL-3.0",
 	"dependencies": {
 		"node-html-parser": "^9.0.3",
 		"raiutils": "^9.3.0"
